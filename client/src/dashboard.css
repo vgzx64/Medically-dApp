@@ -1,0 +1,110 @@
+/* dashboard.css — control-panel shell + consistent cards */
+.card {
+  box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.08);
+}
+.card-header {
+  font-weight: 600;
+}
+
+/* --- shell ------------------------------------------------------------ */
+.app-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 1030;
+  min-height: 3.5rem;
+}
+
+.app-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 1.25rem;
+  padding: 1.25rem;
+  max-width: 1600px;
+  margin: 0 auto;
+}
+
+.app-sidebar {
+  position: sticky;
+  top: 4.75rem;
+  flex: 0 0 13rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.app-sidebar a {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  color: #344767;
+  text-decoration: none;
+}
+
+.app-sidebar a:hover {
+  background: #eef1f6;
+}
+
+.app-sidebar a.is-active {
+  background: #0d6efd;
+  color: #fff;
+  font-weight: 600;
+}
+
+.app-sidebar .nav-count {
+  margin-left: auto;
+  font-size: 0.75rem;
+}
+
+.app-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.page-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.app-txstrip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 1rem;
+  border: 1px solid #dee2e6;
+  border-radius: 0.5rem;
+  background: #fff;
+  font-size: 0.875rem;
+}
+
+.app-txstrip.is-failed {
+  border-color: #f1aeb5;
+  background: #fff5f6;
+}
+
+/* Below the lg breakpoint the sidebar turns into a scrollable tab strip. */
+@media (max-width: 991.98px) {
+  .app-body {
+    flex-direction: column;
+    padding: 0.75rem;
+  }
+  .app-sidebar {
+    position: static;
+    flex: 0 0 auto;
+    flex-direction: row;
+    gap: 0.25rem;
+    width: 100%;
+    overflow-x: auto;
+    padding-bottom: 0.25rem;
+  }
+  .app-sidebar a {
+    white-space: nowrap;
+  }
+}

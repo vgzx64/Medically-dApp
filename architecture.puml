@@ -1,0 +1,186 @@
+@startuml
+!theme plain
+skinparam componentStyle rectangle
+skinparam monochrome true
+skinparam shadowing false
+skinparam handwritten false
+skinparam defaultFontName "Helvetica"
+skinparam defaultFontSize 12
+
+title Patient Consent Registry — Web3 dApp Architecture
+
+' ============================================================
+' LAYER 0 — USERS / ACTORS
+' ============================================================
+rectangle "Patient\n(end user)" as Patient #white
+rectangle "Registrar\n(medical org staff)" as Registrar #white
+rectangle "Admin\n(multisig in prod)" as Admin #white
+
+' ============================================================
+' LAYER 1 — CLIENT / dApp (React + TypeScript + Vite, ethers v6)
+' ============================================================
+package "dApp (React 18 + TypeScript + Vite, http://127.0.0.1:5173)" <<Browser>> #lightblue {
+
+  rectangle "App.tsx\n(hash routing: #/consents/...)" as App
+
+  rectangle "ConsentsPage\n├─ SignPanel (EIP-712 sign)\n├─ RegisterPanel (registrar tx)\n├─ RevokePanel (patient tx)\n└─ LookupPanel (view)" as ConsentsPage
+
+  rectangle "OverviewPage\n(session, counters,\nlast events)" as OverviewPage
+
+  rectangle "EventsPage\n(contract event log)" as EventsPage
+
+  rectangle "Monitoring\n(telemetry, rules R1/R2,\nalerts)" as Monitoring
+
+  rectangle "AdminPanel\n(setRegistrar,\npause/unpause)" as AdminPanel
+
+  rectangle "Configuration\n(RPC url, chainId,\ncontract address, localStorage)" as ConfigPanel
+
+  rectangle "WalletPanel\n(connect/switch account)" as WalletPanel
+
+  rectangle "TxStatus\n(tx receipt polling)" as TxStatus
+
+  rectangle "EventList" as EventList
+
+  rectangle lib_contract as "contract.ts\n(ethers Contract wrapper,\nreads/writes via RPC)" #white
+  rectangle lib_consent as "consent.ts\n(EIP-712 typed-data\nhashing & signing)" #white
+  rectangle lib_wallet as "wallet.ts\n(provider/signer mgmt)" #white
+  rectangle lib_telemetry as "telemetry.ts\n(client telemetry,\nno secrets)" #white
+  rectangle lib_rules as "rules.ts\n(monitoring rules R1/R2)" #white
+  rectangle lib_tx as "tx.ts\n(tx send & receipt\npolling helpers)" #white
+  rectangle lib_abi as "contractArtifact.json\n(ABI + bytecode)" #white
+}
+' ============================================================
+' TRUST BOUNDARY B2 — dApp <-> Wallet
+' ============================================================
+cloud "Wallet\n(MetaMask / dev wallet,\nAnvil account #0)\nsigns txs & EIP-712" as Wallet
+
+' ============================================================
+' TRUST BOUNDARY B3 — Wallet <-> RPC
+' ============================================================
+package "Local blockchain: Anvil\n(127.0.0.1:8545, chainId 31337)" <<LocalNet>> #lightyellow {
+  database "RPC node\neth_sendTransaction,\neth_call, eth_getLogs,\nevent logs & receipts" as Anvil
+}
+
+' ============================================================
+' TRUST BOUNDARY B4 — RPC <-> Contract
+' ============================================================
+package "Smart contract layer\n(Solidity 0.8.37, Foundry, OpenZeppelin)" <<Blockchain>> #lightgreen {
+
+  rectangle "PatientConsentRegistry.sol" as Contract #white
+
+  rectangle "AccessControl\n├─ ADMIN_ROLE\n└─ REGISTRAR_ROLE" as AccessControl #white
+
+  rectangle "Pausable\n(pause/unpause,\nemergency stop)" as Pausable #white
+
+  rectangle "EIP712\n(_hashTypedDataV4,\nCONSENT_TYPEHASH)" as EIP712 #white
+
+  rectangle "Storage\n├─ _consents\n│   (mapping bytes32 => Consent)\n├─ nonces\n│   (mapping address => uint256)\n└─ ConsentStatus enum\n   (NONE/ACTIVE/REVOKED/EXPIRED)" as Storage #white
+
+  rectangle "Events\n├─ ConsentRecorded\n├─ ConsentRevoked\n├─ RegistrarUpdated\n└─ ContractPaused/Unpaused" as Events #white
+
+  rectangle "Vulnerable variant\nPatientConsentRegistryVuln.sol\n(tx.origin auth — neg. tests only)" as Vuln #white
+}
+
+' ============================================================
+' DEPLOYMENT / TOOLING (outside runtime path)
+' ============================================================
+package "Foundry tooling & DevSecOps\n(build-time / CI / ops)" #white {
+
+  rectangle script_deploy as "script/Deploy.s.sol\n(deploys contract,\nwrites client/.env.local)" #white
+  rectangle script_roles as "script/GrantRoles.s.sol\n(grants REGISTRAR_ROLE)" #white
+
+  rectangle test_contract as "test/*.t.sol\n(integration, fuzzing,\ninvariant I1–I3)" #white
+
+  rectangle slither as "Slither static analysis\n(fixed vs vulnerable)" #white
+
+  rectangle ci as ".github/workflows/\nci.yml + integration.yml" #white
+
+  rectangle loadtest as "tools/loadtest.js\n(load test, throughput/latency)" #white
+
+  rectangle monitor as "tools/monitor_demo.mjs\n(alert rules R1/R2,\ntelemetry jsonl)" #white
+
+  rectangle playwright as "Playwright\n(E2E screenshots)" #white
+}
+
+' ============================================================
+' RELATIONSHIPS — RUNTIME DATA FLOW
+' ============================================================
+
+Patient --> Wallet : connects account
+Registrar --> Wallet : connects account
+Admin --> Wallet : connects account
+
+Wallet ..> App : dApp detects provider
+Wallet --> lib_wallet : ethers provider/signer
+lib_wallet --> lib_contract : signer
+
+App --> ConsentsPage : route
+App --> OverviewPage : route
+App --> EventsPage : route
+App --> Monitoring : route
+App --> AdminPanel : route
+App --> ConfigPanel : route
+App --> WalletPanel : route
+
+ConsentsPage --> lib_consent : build/sign EIP-712
+ConsentsPage --> lib_contract : recordConsent / revokeConsent / lookups
+ConsentsPage --> lib_tx : send & poll receipt
+
+RegisterPanel ..> lib_contract : only REGISTRAR_ROLE
+RevokePanel ..> lib_contract : msg.sender == patient
+AdminPanel ..> lib_contract : only ADMIN_ROLE
+
+lib_contract --> lib_abi : ABI interface
+lib_contract --> Anvil : JSON-RPC (eth_call / eth_sendTransaction)
+lib_tx --> Anvil : wait for receipt
+
+Anvil ..> Contract : executes transactions
+Contract ..> AccessControl : role checks (onlyRole)
+Contract ..> Pausable : whenNotPaused / pause
+Contract ..> EIP712 : digest computation
+Contract ..> Storage : read/write consents & nonces
+Contract ..> Events : emit on state change
+
+' ============================================================
+' TRUST BOUNDARIES (as labelled boxes)
+' ============================================================
+
+rectangle "Trust boundary B1\n(user -> UI)\nUI role checks are NOT authorization" as B1 #white
+rectangle "Trust boundary B2\ndApp -> wallet\n(wallet controls signing key)" as B2 #white
+rectangle "Trust boundary B3\nwallet -> RPC\n(signed txs over HTTP)" as B3 #white
+rectangle "Trust boundary B4\nRPC -> contract\n(on-chain authorization enforced)" as B4 #white
+
+Patient -[#gray]-> B1 : untrusted
+App -[#gray]-> B2
+Wallet -[#gray]-> B3
+Anvil -[#gray]-> B4
+
+' ============================================================
+' DEPLOYMENT / TOOLING LINKS (dashed, out-of-band)
+' ============================================================
+
+script_deploy -.> Contract : deploys (foundry)
+script_roles -.> Contract : grants roles (foundry)
+test_contract -.> Contract : 21 Forge tests
+slither -.> Contract : static analysis
+ci -.> script_deploy : runs in CI
+ci -.> test_contract : runs in CI
+ci -.> slither : gate on high/medium
+loadtest -.> Anvil : 30 seq + 30 @ concurrency 5
+monitor -.> Anvil : polls state/logs
+playwright -.> App : E2E screenshots
+
+' ============================================================
+' LEGEND
+' ============================================================
+
+legend right
+  <<Browser>>   React frontend (Vite dev server)
+  <<LocalNet>>  Anvil local Ethereum node
+  <<Blockchain>> Smart contract on EVM
+  -[#black]->   direct runtime call
+  -[#gray]-     trust boundary
+  -.->          build-time / CI / ops link
+endlegend
+
+@enduml

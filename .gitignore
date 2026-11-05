@@ -1,0 +1,43 @@
+# Foundry
+out/
+cache/
+broadcast/
+
+# Node
+node_modules/
+client/dist/
+client/.vite/
+*.tsbuildinfo
+
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+
+# Local env
+.env
+.env.local
+
+# Local run state
+.anvil.pid
+.preview.pid
+.contract-address
+
+# Generated verification artefacts
+artifacts/
+
+# Editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.~lock.*
+
+# Course/lab paperwork - not part of the project
+report/
+tools/build_report.py
+architecture.png
+*.pdf
+*.docx
+*.odt
+*.tex

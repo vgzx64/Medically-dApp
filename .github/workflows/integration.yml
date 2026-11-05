@@ -1,0 +1,169 @@
+name: Integration
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+  schedule:
+    # Every night at 03:00 UTC
+    - cron: '0 3 * * *'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FOUNDRY_VERSION: v1.8.3
+  NODE_VERSION: '22'
+
+jobs:
+  # ------------------------------------------------------------------
+  # End-to-end run against a local Anvil node:
+  # deploy -> dApp build -> load test -> monitoring demo -> screenshots
+  # ------------------------------------------------------------------
+  e2e:
+    name: End-to-end (Anvil + load test + monitoring)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: ${{ env.FOUNDRY_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install the client dependencies
+        working-directory: client
+        run: npm ci
+
+      - name: Start Anvil
+        run: |
+          mkdir -p artifacts/logs
+          nohup anvil --port 8545 --host 127.0.0.1 --chain-id 31337 \
+            --block-base-fee-per-gas 0 > artifacts/logs/anvil.log 2>&1 &
+          echo $! > .anvil.pid
+          sleep 3
+          cast block-number --rpc-url http://127.0.0.1:8545
+
+      - name: Deploy the registry and grant the roles
+        run: |
+          # Publicly known Anvil development keys (never used on a public network).
+          export ADMIN_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+          export REGISTRAR_ADDRESS=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
+          forge script script/Deploy.s.sol:Deploy \
+            --rpc-url http://127.0.0.1:8545 \
+            --broadcast --private-key $ADMIN_PRIVATE_KEY
+          CONTRACT=$(python3 -c "
+          import json, glob
+          for f in glob.glob('broadcast/Deploy.s.sol/31337/run-latest.json'):
+              d = json.load(open(f))
+              for tx in d.get('transactions', []):
+                  if tx.get('transactionType') == 'CREATE':
+                      print(tx['contractAddress'])
+          ")
+          echo "CONTRACT=$CONTRACT" >> $GITHUB_ENV
+          echo "$CONTRACT" > .contract-address
+
+          # The dApp demo signer must also hold REGISTRAR_ROLE.
+          export REGISTRY_ADDRESS="$CONTRACT"
+          export ENABLED=true
+          export REGISTRAR_ADDRESS=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+          forge script script/GrantRoles.s.sol:GrantRoles \
+            --rpc-url http://127.0.0.1:8545 \
+            --broadcast --private-key $ADMIN_PRIVATE_KEY
+
+      - name: Load test (sequential vs parallel)
+        run: |
+          node tools/loadtest.js \
+            --rpc http://127.0.0.1:8545 \
+            --contract "$CONTRACT" \
+            --registrar 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
+            --private-key 0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d \
+            --tx 30 --concurrency 5 --profile both \
+            --out artifacts/logs/loadtest.json
+
+      - name: Generate the performance charts
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq imagemagick
+          python3 tools/make_charts.py artifacts/logs/loadtest.json artifacts/logs
+
+      - name: Monitoring demo (detection rules R1 and R2)
+        run: |
+          node tools/monitor_demo.mjs \
+            --rpc http://127.0.0.1:8545 \
+            --contract "$CONTRACT" \
+            --registrar 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 \
+            --registrar-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+            --patient-key 0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d \
+            --attacker-key 0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a \
+            --out-dir artifacts/logs
+
+      - name: Check that the telemetry stream contains no secrets
+        run: |
+          if grep -riE 'privatekey|private_key|0xac0974bec39a17e|0x59c6995e998f97a5|secret|password|mnemonic' artifacts/logs/telemetry.jsonl; then
+            echo "::error::A secret leaked into the telemetry stream"
+            exit 1
+          fi
+          echo "The telemetry stream is secret free."
+
+      - name: Build the dApp
+        working-directory: client
+        run: |
+          # Vite inlines these at build time, so the built app must be told where
+          # the freshly deployed registry lives - otherwise every read fails with
+          # "contractAddress is not configured".
+          export VITE_RPC_URL=http://127.0.0.1:8545
+          export VITE_CHAIN_ID=31337
+          export VITE_WALLET_MODE=dev
+          export VITE_CONTRACT_ADDRESS="$CONTRACT"
+          export VITE_REGISTRAR_ADDRESS=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+          npm run build
+
+      - name: Serve the built dApp and capture the screenshots
+        working-directory: client
+        run: |
+          npx --yes playwright@1.55.1 install --with-deps chromium
+          # `vite preview` serves the production build produced above.
+          # It must run from the client directory so that its root is `client`
+          # and `dist/index.html` resolves.
+          nohup npx vite preview --host 127.0.0.1 --port 4173 --strictPort \
+            > ../artifacts/logs/vite-preview.log 2>&1 &
+          echo $! > ../.preview.pid
+          for i in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:4173 > /dev/null; then echo "preview ready"; break; fi
+            sleep 1
+          done
+          cd ..
+          node tools/screenshots.mjs \
+            --url http://127.0.0.1:4173 \
+            --contract "$CONTRACT" \
+            --out artifacts/screenshots --strict
+          kill "$(cat .preview.pid)" || true
+
+      - name: Upload the integration artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-artifacts
+          path: |
+            artifacts/logs/*.json
+            artifacts/logs/*.jsonl
+            artifacts/logs/*.txt
+            artifacts/logs/*.log
+            artifacts/logs/*.svg
+            artifacts/logs/*.png
+            artifacts/screenshots/*.png
+
+      - name: Stop Anvil
+        if: always()
+        run: kill "$(cat .anvil.pid)" || true
