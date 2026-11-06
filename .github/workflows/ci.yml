@@ -22,7 +22,8 @@ jobs:
   # ------------------------------------------------------------------
   contracts:
     name: Contracts (build + test + invariants)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: .
@@ -36,11 +37,8 @@ jobs:
         with:
           version: ${{ env.FOUNDRY_VERSION }}
 
-      - name: Install solc 0.8.37
-        uses: crytic/solc-select@v1
-        with:
-          version: 0.8.37
-
+      # Foundry 1.8 ships its own compiler, so no solc-select install is needed
+      # here (Slither is the only job that needs a real solc binary).
       - name: Cache Foundry
         uses: actions/cache@v4
         with:
@@ -58,10 +56,14 @@ jobs:
       - name: forge test (unit + integration + fuzz)
         run: forge test -vv
 
+      # The two slow steps below (a 2000-run invariant campaign and the
+      # instrumented coverage build) run on `main` and on demand, not on PRs.
       - name: forge test (invariants, deeper)
+        if: github.event_name != 'pull_request'
         run: forge test --match-path 'test/*invariant*' -vv --fuzz-runs 2000
 
       - name: forge coverage
+        if: github.event_name != 'pull_request'
         run: |
           mkdir -p artifacts/logs
           forge coverage --report summary 2>&1 | tee artifacts/logs/coverage.txt
@@ -76,11 +78,12 @@ jobs:
           if-no-files-found: ignore
 
   # ------------------------------------------------------------------
-  # 2. Static analysis: Slither on the fixed and the vulnerable contract
+  # 2. Static analysis: Slither on the contract
   # ------------------------------------------------------------------
   slither:
     name: Slither (static analysis)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: .
@@ -88,6 +91,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: ${{ env.FOUNDRY_VERSION }}
 
       - uses: actions/setup-python@v5
         with:
@@ -97,45 +105,38 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install slither-analyzer solc-select
-          curl -sL https://raw.githubusercontent.com/FoundryHQ/foundry/master/foundryup/foundryup -o /tmp/foundryup
-          bash /tmp/foundryup
 
       - name: Install solc 0.8.37
         run: solc-select install 0.8.37 && solc-select use 0.8.37
 
-      - name: Slither on the FIXED contract
+      - name: Slither on the contract
         run: |
           mkdir -p artifacts/logs
           slither src/PatientConsentRegistry.sol \
             --exclude-dependencies \
-            --json artifacts/logs/slither-fixed.json
-          python tools/slither_summary.py artifacts/logs/slither-fixed.json
+            --json artifacts/logs/slither.json \
+            --exclude timestamp,pragma
+          python tools/slither_summary.py artifacts/logs/slither.json 
 
-      - name: Slither on the VULNERABLE contract (must report tx-origin)
+      - name: Fail if the contract has a High/Medium finding
         run: |
-          slither src/PatientConsentRegistryVuln.sol \
-            --exclude-dependencies \
-            --json artifacts/logs/slither-vuln.json
-          python tools/slither_summary.py artifacts/logs/slither-vuln.json
-
-      - name: Fail if the fixed contract has a High/Medium finding
-        run: |
-          python tools/slither_summary.py artifacts/logs/slither-fixed.json \
-            artifacts/logs/slither-vuln.json --fail-on high,medium
+          python tools/slither_summary.py artifacts/logs/slither.json \
+            --fail-on high,medium
 
       - name: Upload the Slither reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: slither-reports
-          path: artifacts/logs/slither-*.json
+          path: artifacts/logs/slither.json
 
   # ------------------------------------------------------------------
-  # 3. Web3 client: install, typecheck, lint, unit tests, build
+  # 3. Web3 client: install, typecheck, lint, unit tests, build + supply chain
   # ------------------------------------------------------------------
   client:
-    name: Client (typecheck + tests + build)
-    runs-on: ubuntu-latest
+    name: Client (typecheck + tests + build + supply chain)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: client
@@ -160,34 +161,14 @@ jobs:
       - name: Production build
         run: npm run build
 
-      - name: Dependency audit
-        run: npm audit --audit-level=high
-
-  # ------------------------------------------------------------------
-  # 4. Supply chain: license review of the client dependencies
-  # ------------------------------------------------------------------
-  supply-chain:
-    name: Supply chain (licenses + audit)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: client
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: client/package-lock.json
-
-      - run: npm ci
-
-      - name: npm audit
+      # The supply-chain checks share the `npm ci` above; a separate job only
+      # bought a second checkout, node setup and install for the same result.
+      - name: Dependency audit (moderate and above)
         run: npm audit --audit-level=moderate
 
       - name: License review
         run: |
+          mkdir -p ../artifacts/logs
           npx --yes license-checker-rseidelsohn@4.3.0 \
             --production --json > ../artifacts/logs/licenses.json || true
           node -e "

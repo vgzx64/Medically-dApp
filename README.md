@@ -157,9 +157,12 @@ Runtime detection (`client/src/lib/rules.ts`, exercised by `tools/monitor_demo.m
 address for a cool-down window; `R2` fires on transport-level failures (unreachable RPC,
 timeouts). Telemetry is written without secrets and is scanned for key material in CI.
 
-CI gates everything: `forge fmt --check`, `forge build`, `forge test`, deeper invariant
-runs, `forge coverage`, a Slither High/Medium gate, client typecheck and unit tests, the
-production build, and `npm audit --audit-level=high`.
+CI gates everything: `forge fmt --check`, `forge build`, `forge test`, a Slither
+High/Medium gate, client typecheck and unit tests, the production build, `npm audit
+--audit-level=moderate` and the licence review. The slow campaigns (the 2000-run
+invariant pass, `forge coverage`, the Playwright screenshots and the full end-to-end
+run) only execute on `main`, on the nightly schedule and on `workflow_dispatch`, and
+every workflow step is time-boxed so a stuck download cannot hang a run for hours.
 
 ## License
 

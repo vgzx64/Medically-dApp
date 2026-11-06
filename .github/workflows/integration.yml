@@ -21,11 +21,17 @@ env:
 jobs:
   # ------------------------------------------------------------------
   # End-to-end run against a local Anvil node:
-  # deploy -> dApp build -> load test -> monitoring demo -> screenshots
+  # deploy -> load test -> charts -> monitoring demo -> dApp build -> screenshots
+  #
+  # The browser part only runs outside pull requests (it is the slow one; the
+  # client job of ci.yml already builds the dApp on PRs). Every step is
+  # time-boxed, so a stuck download fails in minutes instead of burning the
+  # six hour job cap.
   # ------------------------------------------------------------------
   e2e:
     name: End-to-end (Anvil + load test + monitoring)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,42 +53,23 @@ jobs:
         run: npm ci
 
       - name: Start Anvil
+        timeout-minutes: 2
         run: |
-          mkdir -p artifacts/logs
-          nohup anvil --port 8545 --host 127.0.0.1 --chain-id 31337 \
-            --block-base-fee-per-gas 0 > artifacts/logs/anvil.log 2>&1 &
-          echo $! > .anvil.pid
-          sleep 3
-          cast block-number --rpc-url http://127.0.0.1:8545
+          ./tools/localnet.sh start
+          # Bounded by the step timeout: a node that never comes up fails fast.
+          until cast block-number --rpc-url http://127.0.0.1:8545 2>/dev/null; do sleep 1; done
 
       - name: Deploy the registry and grant the roles
+        timeout-minutes: 5
         run: |
-          # Publicly known Anvil development keys (never used on a public network).
-          export ADMIN_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
-          export REGISTRAR_ADDRESS=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
-          forge script script/Deploy.s.sol:Deploy \
-            --rpc-url http://127.0.0.1:8545 \
-            --broadcast --private-key $ADMIN_PRIVATE_KEY
-          CONTRACT=$(python3 -c "
-          import json, glob
-          for f in glob.glob('broadcast/Deploy.s.sol/31337/run-latest.json'):
-              d = json.load(open(f))
-              for tx in d.get('transactions', []):
-                  if tx.get('transactionType') == 'CREATE':
-                      print(tx['contractAddress'])
-          ")
-          echo "CONTRACT=$CONTRACT" >> $GITHUB_ENV
-          echo "$CONTRACT" > .contract-address
-
-          # The dApp demo signer must also hold REGISTRAR_ROLE.
-          export REGISTRY_ADDRESS="$CONTRACT"
-          export ENABLED=true
-          export REGISTRAR_ADDRESS=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
-          forge script script/GrantRoles.s.sol:GrantRoles \
-            --rpc-url http://127.0.0.1:8545 \
-            --broadcast --private-key $ADMIN_PRIVATE_KEY
+          # tools/localnet.sh is the single source of truth for the local network:
+          # Anvil on 127.0.0.1:8545, Deploy + GrantRoles, client/.env.local, and
+          # the publicly known Anvil test keys only.
+          ./tools/localnet.sh deploy
+          echo "CONTRACT=$(cat .contract-address)" >> "$GITHUB_ENV"
 
       - name: Load test (sequential vs parallel)
+        timeout-minutes: 5
         run: |
           node tools/loadtest.js \
             --rpc http://127.0.0.1:8545 \
@@ -92,12 +79,16 @@ jobs:
             --tx 30 --concurrency 5 --profile both \
             --out artifacts/logs/loadtest.json
 
+      # The charts are plain SVG built with the Python standard library.
+      # ImageMagick would only rasterise them, and it is not installed on the
+      # runner image: an un-timed `apt-get` here is exactly what made this job
+      # hang for six hours. make_charts.py keeps the SVG when `convert` is absent.
       - name: Generate the performance charts
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq imagemagick
-          python3 tools/make_charts.py artifacts/logs/loadtest.json artifacts/logs
+        timeout-minutes: 3
+        run: python3 tools/make_charts.py artifacts/logs/loadtest.json artifacts/logs
 
       - name: Monitoring demo (detection rules R1 and R2)
+        timeout-minutes: 5
         run: |
           node tools/monitor_demo.mjs \
             --rpc http://127.0.0.1:8545 \
@@ -116,7 +107,10 @@ jobs:
           fi
           echo "The telemetry stream is secret free."
 
+      # The browser tail below is the slow part and only runs on `main`, the
+      # nightly schedule and workflow_dispatch; ci.yml builds the client on PRs.
       - name: Build the dApp
+        if: github.event_name != 'pull_request'
         working-directory: client
         run: |
           # Vite inlines these at build time, so the built app must be told where
@@ -129,10 +123,20 @@ jobs:
           export VITE_REGISTRAR_ADDRESS=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
           npm run build
 
+      - name: Cache the Playwright browsers
+        if: github.event_name != 'pull_request'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('client/package-lock.json') }}
+
       - name: Serve the built dApp and capture the screenshots
+        if: github.event_name != 'pull_request'
+        timeout-minutes: 10
         working-directory: client
         run: |
-          npx --yes playwright@1.55.1 install --with-deps chromium
+          # The pinned devDependency; no extra registry download.
+          npx playwright install --with-deps chromium
           # `vite preview` serves the production build produced above.
           # It must run from the client directory so that its root is `client`
           # and `dist/index.html` resolves.
@@ -166,4 +170,4 @@ jobs:
 
       - name: Stop Anvil
         if: always()
-        run: kill "$(cat .anvil.pid)" || true
+        run: ./tools/localnet.sh stop
